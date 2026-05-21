@@ -5,12 +5,10 @@
 # Description: Fixes Audient iD audio interfaces disconnect/drop issues 
 #              after Linux system suspend/sleep.
 # Author:      moonessence
-# Co-Author:   Gemini Flash AI Assistant
 # License:     MIT License
 # Repository:  https://github.com/moonessence/audient-usb-sleep-fix
 # ==============================================================================
 
-# Target Audient Vendor ID (Works for iD4, iD14, and other hardware revisions)
 VENDOR_ID="2708"
 
 clog() {
@@ -20,19 +18,14 @@ clog() {
 
 get_audient_port() {
     vendor_id="$1"
-    
     for dev_path in /sys/bus/usb/devices/*; do
         if [ -d "$dev_path" ]; then
-            # POSIX-compliant and fast way to skip USB interfaces (containing ':')
             case "$dev_path" in
                 *:*) continue ;;
             esac
-            
             if [ -f "$dev_path/idVendor" ]; then
                 current_vendor_id=$(cat "$dev_path/idVendor" 2>/dev/null)
-                
                 if [ "$current_vendor_id" = "$vendor_id" ]; then
-                    # Pure POSIX alternative to the 'basename' command
                     echo "${dev_path##*/}"
                     return 0
                 fi
@@ -44,9 +37,22 @@ get_audient_port() {
 
 case "$1" in
     pre)
-        # Do not unbind before suspend to prevent PipeWire panic and log spam.
-        # Let the kernel handle the standard suspend process.
-        clog "System suspending. Leaving Audient device alone."
+        PORT=$(get_audient_port "$VENDOR_ID")
+        
+        if [ -n "$PORT" ]; then
+            clog "Preparing Audient on port $PORT for suspend..."
+            if [ -f "/sys/bus/usb/devices/$PORT/power/control" ]; then
+                echo "auto" > "/sys/bus/usb/devices/$PORT/power/control" 2>/dev/null
+            fi
+            sync
+            
+            if [ -f "/sys/bus/usb/drivers/usb/unbind" ]; then
+                echo "$PORT" > "/sys/bus/usb/drivers/usb/unbind" 2>/dev/null
+                clog "Audient successfully isolated before suspend."
+            fi
+        else
+            clog "Audient device not found, suspending normally."
+        fi
         ;;
         
     post)
@@ -54,29 +60,24 @@ case "$1" in
         
         PORT=""
         i=1
-        
-        # POSIX-compliant loop (without 'seq') - 10 seconds total timeout (20 * 0.5s)
         while [ "$i" -le 20 ]; do
             PORT=$(get_audient_port "$VENDOR_ID")
-            
             if [ -n "$PORT" ]; then
                 break
             fi
-            
             sleep 0.5
             i=$((i + 1))
         done
 
         if [ -n "$PORT" ]; then
-            clog "Audient found on port $PORT. Initiating soft re-plug..."
+            if [ -f "/sys/bus/usb/drivers/usb/bind" ]; then
+                echo "$PORT" > "/sys/bus/usb/drivers/usb/bind" 2>/dev/null
+            fi
             
-            # Soft replug: logically disconnect and reconnect the device
-            # This triggers proper udev events for PipeWire to re-acquire the sink
-            echo "0" > "/sys/bus/usb/devices/$PORT/authorized" 2>/dev/null
-            sleep 1
-            echo "1" > "/sys/bus/usb/devices/$PORT/authorized" 2>/dev/null
-            
-            clog "Audient on port $PORT successfully reset and stabilized."
+            if [ -f "/sys/bus/usb/devices/$PORT/power/control" ]; then
+                echo "on" > "/sys/bus/usb/devices/$PORT/power/control" 2>/dev/null
+            fi
+            clog "Audient on port $PORT successfully resumed and stabilized."
         else
             clog "CRITICAL ERROR: Audient failed to reappear on the USB bus after resume!"
         fi
