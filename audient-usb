@@ -44,23 +44,9 @@ get_audient_port() {
 
 case "$1" in
     pre)
-        PORT=$(get_audient_port "$VENDOR_ID")
-        
-        if [ -n "$PORT" ]; then
-            clog "Preparing Audient on port $PORT for suspend..."
-            
-            if [ -f "/sys/bus/usb/devices/$PORT/power/control" ]; then
-                echo "auto" > "/sys/bus/usb/devices/$PORT/power/control" 2>/dev/null
-            fi
-            sync
-            
-            if [ -f "/sys/bus/usb/drivers/usb/unbind" ]; then
-                echo "$PORT" > "/sys/bus/usb/drivers/usb/unbind" 2>/dev/null
-                clog "Audient successfully isolated before suspend."
-            fi
-        else
-            clog "Audient device not found, suspending normally."
-        fi
+        # Do not unbind before suspend to prevent PipeWire panic and log spam.
+        # Let the kernel handle the standard suspend process.
+        clog "System suspending. Leaving Audient device alone."
         ;;
         
     post)
@@ -82,14 +68,15 @@ case "$1" in
         done
 
         if [ -n "$PORT" ]; then
-            if [ -f "/sys/bus/usb/drivers/usb/bind" ]; then
-                echo "$PORT" > "/sys/bus/usb/drivers/usb/bind" 2>/dev/null
-            fi
+            clog "Audient found on port $PORT. Initiating soft re-plug..."
             
-            if [ -f "/sys/bus/usb/devices/$PORT/power/control" ]; then
-                echo "on" > "/sys/bus/usb/devices/$PORT/power/control" 2>/dev/null
-            fi
-            clog "Audient on port $PORT successfully resumed and stabilized."
+            # Soft replug: logically disconnect and reconnect the device
+            # This triggers proper udev events for PipeWire to re-acquire the sink
+            echo "0" > "/sys/bus/usb/devices/$PORT/authorized" 2>/dev/null
+            sleep 1
+            echo "1" > "/sys/bus/usb/devices/$PORT/authorized" 2>/dev/null
+            
+            clog "Audient on port $PORT successfully reset and stabilized."
         else
             clog "CRITICAL ERROR: Audient failed to reappear on the USB bus after resume!"
         fi
