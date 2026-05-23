@@ -2,14 +2,17 @@
 
 # ==============================================================================
 # Script Name: audient-usb
-# Description: Fixes Audient iD audio interfaces disconnect/drop issues 
+# Description: Fixes Audient iD audio interfaces disconnect/drop issues
 #              after Linux system suspend/sleep.
-# Author:      moonessence
+# Author:      moonessence (Ultimate version)
 # License:     MIT License
-# Repository:  https://github.com/moonessence/audient-usb-sleep-fix
 # ==============================================================================
 
+# Ensure script is run as root (systemd hooks run as root, this is for manual tests)
+[ "$(id -u)" -ne 0 ] && { echo "Must be root to manage USB power states"; exit 1; }
+
 VENDOR_ID="2708"
+PRODUCT_ID=""
 
 clog() {
     logger -t audient-usb "[audient-usb] $1"
@@ -17,15 +20,25 @@ clog() {
 }
 
 get_audient_port() {
-    vendor_id="$1"
+    target_vid="$1"
+    target_pid="$2"
+
     for dev_path in /sys/bus/usb/devices/*; do
         if [ -d "$dev_path" ]; then
-            case "$dev_path" in
+            case "${dev_path##*/}" in
                 *:*) continue ;;
             esac
+
             if [ -f "$dev_path/idVendor" ]; then
-                current_vendor_id=$(cat "$dev_path/idVendor" 2>/dev/null)
-                if [ "$current_vendor_id" = "$vendor_id" ]; then
+                current_vid=$(cat "$dev_path/idVendor" 2>/dev/null)
+                
+                if [ "$current_vid" = "$target_vid" ]; then
+                    if [ -n "$target_pid" ] && [ -f "$dev_path/idProduct" ]; then
+                        current_pid=$(cat "$dev_path/idProduct" 2>/dev/null)
+                        if [ "$current_pid" != "$target_pid" ]; then
+                            continue
+                        fi
+                    fi
                     echo "${dev_path##*/}"
                     return 0
                 fi
@@ -37,14 +50,14 @@ get_audient_port() {
 
 case "$1" in
     pre)
-        PORT=$(get_audient_port "$VENDOR_ID")
+        PORT=$(get_audient_port "$VENDOR_ID" "$PRODUCT_ID")
         
         if [ -n "$PORT" ]; then
             clog "Preparing Audient on port $PORT for suspend..."
+            
             if [ -f "/sys/bus/usb/devices/$PORT/power/control" ]; then
-                echo "auto" > "/sys/bus/usb/devices/$PORT/power/control" 2>/dev/null
+                echo "on" > "/sys/bus/usb/devices/$PORT/power/control" 2>/dev/null
             fi
-            sync
             
             if [ -f "/sys/bus/usb/drivers/usb/unbind" ]; then
                 echo "$PORT" > "/sys/bus/usb/drivers/usb/unbind" 2>/dev/null
@@ -61,7 +74,7 @@ case "$1" in
         PORT=""
         i=1
         while [ "$i" -le 20 ]; do
-            PORT=$(get_audient_port "$VENDOR_ID")
+            PORT=$(get_audient_port "$VENDOR_ID" "$PRODUCT_ID")
             if [ -n "$PORT" ]; then
                 break
             fi
@@ -70,13 +83,33 @@ case "$1" in
         done
 
         if [ -n "$PORT" ]; then
-            if [ -f "/sys/bus/usb/drivers/usb/bind" ]; then
-                echo "$PORT" > "/sys/bus/usb/drivers/usb/bind" 2>/dev/null
+            # Check if the kernel already bound the driver automatically
+            driver_link="/sys/bus/usb/devices/$PORT/driver"
+            if [ ! -L "$driver_link" ]; then
+                if [ -f "/sys/bus/usb/drivers/usb/bind" ]; then
+                    echo "$PORT" > "/sys/bus/usb/drivers/usb/bind" 2>/dev/null
+                    clog "Manually bound device to USB driver."
+                fi
+            else
+                clog "Device already bound by kernel."
             fi
             
-            if [ -f "/sys/bus/usb/devices/$PORT/power/control" ]; then
-                echo "on" > "/sys/bus/usb/devices/$PORT/power/control" 2>/dev/null
+            # Active wait for power/control node instead of hard sleep
+            j=1
+            while [ "$j" -le 10 ]; do
+                if [ -f "/sys/bus/usb/devices/$PORT/power/control" ]; then
+                    echo "on" > "/sys/bus/usb/devices/$PORT/power/control" 2>/dev/null
+                    clog "USB autosuspend permanently disabled for port $PORT."
+                    break
+                fi
+                sleep 0.1
+                j=$((j + 1))
+            done
+            
+            if [ "$j" -gt 10 ]; then
+                clog "WARNING: power/control node did not appear, autosuspend NOT disabled."
             fi
+            
             clog "Audient on port $PORT successfully resumed and stabilized."
         else
             clog "CRITICAL ERROR: Audient failed to reappear on the USB bus after resume!"
